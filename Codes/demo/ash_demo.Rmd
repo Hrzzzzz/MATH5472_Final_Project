@@ -1,0 +1,140 @@
+---
+title: "MATH5472 Final Project: Demo for Replication of ASH"
+header-includes:
+  - \usepackage[ruled,vlined,linesnumbered]{algorithm2e}
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+date: '2023-12-15'
+author: Ruizhao Huang
+---
+
+### $\textbf{Load Packges and Source Codes}$
+
+```{r, fig.width=10, fig.height=8}
+rm(list=ls())
+setwd("/Users/ruizhaohuang/Desktop/hws/MATH5472_Final_Project/Codes")
+suppressPackageStartupMessages(library(wavethresh))
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(ggplot2))
+suppressPackageStartupMessages(library(gridExtra))
+suppressPackageStartupMessages(library(ashr))
+suppressPackageStartupMessages(library(doParallel))
+suppressPackageStartupMessages(library(foreach))
+suppressPackageStartupMessages(library(doSNOW))
+source('./src/signals.R')
+source('./src/ash_em.R')
+```
+
+\
+
+### $\textbf{Generate Normal Data Using Spike Mean Function}$
+
+```{r, fig.width=10, fig.height=8}
+set.seed(1)
+f_num <- 7
+N <- 2^f_num
+t <- (1:N)/N
+mu <- spike.fn(t,"mean")
+sigma.ini <- sqrt(cblocks.fn(t,"var"))
+sd.fn <- sigma.ini/mean(sigma.ini) * sd(mu)/3
+z <- rnorm(N, mu, sd.fn)
+```
+
+\
+
+### $\textbf{Apply Non-Decimated Wavelet Transform}$
+```{r, fig.width=10, fig.height=8}
+I_N <- diag(1, N)
+W_all <- NULL
+for (i in 1:N){
+    w_tmp <- wavethresh::wd(diag(1, N)[i, ], type="station", filter.number=10, family="DaubLeAsymm")$D
+    W_all <- cbind(W_all, w_tmp)
+}
+w_all <- as.numeric(W_all %*% z)
+idx <- seq(1, dim(W_all)[1]+1, N)
+W <- list()
+w <- list()
+for (i in 1:f_num){
+    W[[i]] <- W_all[idx[i]:(idx[i+1]-1), ]
+    w[[i]] <- w_all[idx[i]:(idx[i+1]-1)]
+}
+```
+
+\
+
+### $\textbf{Apply My Replication of ASH and also "ash" on Wavelet Coefficients}$
+```{r, fig.width=10, fig.height=8}
+# initial estimates of s
+lag_z <- lag(z, 1) %>% replace(1, tail(z, 1))
+lead_z <- lead(z, 1) %>% replace(N, head(z, 1))
+s = sqrt(0.5 * ((z - lag_z)^2 + (z - lead_z)^2))
+
+# set parallel process
+pp_foreach <- txtProgressBar(max=f_num, style=3)
+progress <- function(n) setTxtProgressBar(pp_foreach, n)
+opts <- list(progress = progress)
+cl <- makeCluster(f_num)
+registerDoSNOW(cl)
+
+res <- foreach(i=1:f_num, .combine='rbind', .options.snow=opts, .packages=c('tidyverse', 'ashr')) %dopar%{
+    tilde_s <- sqrt(diag(W[[i]] %*% diag(s^2) %*% t(W[[i]])))
+    tilde_mu <- W[[i]] %*% mu
+  
+    # my replication of ASH
+    ash_est1 <- ash_em(z=w[[i]], s=tilde_s, iter=2000, verbose=FALSE)
+    
+    # ash function from "ashr" package
+    ash_est2 <- ashr::ash(betahat=w[[i]], sebetahat=tilde_s, mixcompdist='normal', optmethod='mixEM')
+
+    MSE_est1 <- sum((ash_est1$pos_mu - tilde_mu)^2) / N
+    MSE_est2 <- sum((get_pm(ash_est2) - tilde_mu)^2) / N
+    MSE <- c(MSE_est1, MSE_est2)
+
+    log_lkh <- c(tail(ash_est1$log_lkh, 1), ash_est2$loglik)
+
+    Pi_0 <- c(ash_est1$Pi[1], ash_est2$fitted_g$pi[1])
+    l1_Pi_k <- c(sum(abs(ash_est1$Pi[-1])), sum(abs(ash_est2$fitted_g$pi[-1])))
+
+    out <- tibble(Algo = c('My_Rep', 'Package'), wavelet=i, 
+                MSE = MSE, log_lkh=log_lkh, Pi_0=Pi_0, l1_Pi_k=l1_Pi_k)
+    out
+}
+```
+
+\
+
+### $\textbf{Comparison of My Replication with Existing Package}$
+```{r, fig.width=15, fig.height=10}
+# pdf(file = '../Report/plot/compare.pdf', width = 15, height = 10)
+res <- res %>% mutate(wavelet = as.factor(wavelet))
+
+p1 <- ggplot(res, aes_string(x='wavelet', y='MSE', fill='Algo')) + 
+    geom_bar(stat="identity", color="black", position=position_dodge(), width=0.6) +
+    labs(title='Comparison of MSE', x='wavelet', y = "MSE") + theme_classic() + 
+    theme(plot.title = element_text(hjust = 0.5)) + 
+    theme(plot.title = element_text(size = 20, face = "bold")) 
+
+p2 <- ggplot(res, aes_string(x='wavelet', y='log_lkh', fill='Algo')) + 
+    geom_bar(stat="identity", color="black", position=position_dodge(), width=0.6) +
+    labs(title='Comparison of incomplete log-lkh', x='wavelet', y = "log_lkh") + theme_classic() + 
+    theme(plot.title = element_text(hjust = 0.5)) + 
+    theme(plot.title = element_text(size = 20, face = "bold")) 
+
+p3 <- ggplot(res, aes_string(x='wavelet', y='Pi_0', fill='Algo')) + 
+    geom_bar(stat="identity", color="black", position=position_dodge(), width=0.6) +
+    labs(title='Comparison of Pi_0', x='wavelet', y = "Pi_0") + theme_classic() + 
+    theme(plot.title = element_text(hjust = 0.5)) + 
+    theme(plot.title = element_text(size = 20, face = "bold")) 
+
+p4 <- ggplot(res, aes_string(x='wavelet', y='l1_Pi_k', fill='Algo')) + 
+    geom_bar(stat="identity", color="black", position=position_dodge(), width=0.6) +
+    labs(title='Comparison of l1 norm of Pi_k for k != 0', x='wavelet', y = "l1_Pi_k") + theme_classic() + 
+    theme(plot.title = element_text(hjust = 0.5)) + 
+    theme(plot.title = element_text(size = 20, face = "bold")) 
+
+grid.arrange(p1, p2, p3, p4,  nrow=2, ncol=2)
+# dev.off()
+```
+

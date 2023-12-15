@@ -1,0 +1,139 @@
+---
+title: "MATH5472 Final Project: Demo for Replication of SMASH"
+header-includes:
+  - \usepackage[ruled,vlined,linesnumbered]{algorithm2e}
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+date: '2023-12-15'
+author: Ruizhao Huang
+---
+
+### $\textbf{Load Packges and Source Codes}$
+
+```{r, fig.width=10, fig.height=8}
+rm(list=ls())
+setwd("/Users/ruizhaohuang/Desktop/hws/MATH5472_Final_Project/Codes")
+suppressPackageStartupMessages(library(wavethresh))
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(ggplot2))
+suppressPackageStartupMessages(library(gridExtra))
+suppressPackageStartupMessages(library(smashr))
+suppressPackageStartupMessages(library(ashr))
+source('./src/signals.R')
+source('./src/smash_em.R')
+```
+
+\
+
+### $\textbf{Generate Normal Data Using Spike Mean Function}$
+
+```{r, fig.width=10, fig.height=8}
+set.seed(1)
+f_num <- 4
+N <- 2^f_num
+t <- (1:N)/N
+mu <- spike.fn(t,"mean")
+sigma.ini <- sqrt(cblocks.fn(t,"var"))
+sd.fn <- sigma.ini/mean(sigma.ini) * sd(mu)/3
+z <- rnorm(N, mu, sd.fn)
+```
+
+\
+
+### $\textbf{Apply Non-Decimated Wavelet Transform}$
+```{r, fig.width=10, fig.height=8}
+I_N <- diag(1, N)
+W_all <- NULL
+for (i in 1:N){
+    w_tmp <- wavethresh::wd(diag(1, N)[i, ], type="station", filter.number=10, family="DaubLeAsymm")$D
+    W_all <- cbind(W_all, w_tmp)
+}
+w_all <- as.numeric(W_all %*% z)
+idx <- seq(1, dim(W_all)[1]+1, N)
+W <- list()
+w <- list()
+for (i in 1:f_num){
+    W[[i]] <- W_all[idx[i]:(idx[i+1]-1), ]
+    w[[i]] <- w_all[idx[i]:(idx[i+1]-1)]
+}
+```
+
+\
+
+### $\textbf{Replication of SMASH Using My Own Implementation of ASH}$
+Note that it may took a while to run, because the slow convergence of standard EM algorithm.
+```{r, fig.width=10, fig.height=8}
+res1 = smash_em(z, w, W, s)
+```
+
+\
+
+### $\textbf{Replication of SMASH using ash Function in ashr Package}$
+
+Note that it may took a while to run, because the slow convergence of standard EM algorithm, especially when number of observation is large.
+
+```{r, fig.width=10, fig.height=8}
+# initial estimate of s
+lag_z <- lag(z, 1) %>% replace(1, tail(z, 1))
+lead_z <- lead(z, 1) %>% replace(N, head(z, 1))
+s = sqrt(0.5 * ((z - lag_z)^2 + (z - lead_z)^2))
+
+iter <- 2
+mu_est_mat <- matrix(0, nrow=(iter+1), ncol=N)
+s_est_mat <- matrix(0, nrow=(iter+1), ncol=N)
+s_est_mat[1, ] <- s
+for (k in 2:(iter+1)){
+  # estimate mu
+  trans_mu <- data_trans_mu(z, s_est_mat[k-1, ], W)
+  est_hat <- matrix(0, nrow=f_num, ncol=N)
+  for(i in 1:f_num){
+    ash_res <- ashr::ash(betahat=w[[i]], sebetahat=trans_mu$tilde_s[[i]],
+                         mixcompdist='normal', optmethod='mixEM')
+    est_hat[i, ] <- as.numeric(t(W[[i]]) %*% get_pm(ash_res))
+  }
+  mu_est_mat[k, ] <- colMeans(est_hat)
+   
+  # estimate s
+  trans_s <- data_trans_var(z, mu_est_mat[k, ], W)
+  est_hat <- matrix(0, nrow=f_num, ncol=N)
+  for(i in 1:f_num){
+    ash_res <- ashr::ash(betahat=trans_s$tilde_w[[i]],
+                         sebetahat=trans_s$tilde_psi[[i]], 
+                         mixcompdist='normal', optmethod='mixEM')
+    est_hat[i, ] <- as.numeric(t(W[[i]]) %*% get_pm(ash_res))
+  }
+  s_est_mat[k, ] <- colMeans(est_hat)
+  s_est_mat[s_est_mat <= 0] <- 1e-4
+  s_est_mat[k, ] <- sqrt(s_est_mat[k, ])
+}
+
+res2 = mu_est_mat[(iter+1), ]
+```
+
+\
+
+### $\textbf{Directly call smash Function in smashr Package}$
+Note that it may took a while to run, because the slow convergence of standard EM algorithm.
+```{r, fig.width=10, fig.height=8}
+res3 <- smash(z, family="DaubLeAsymm", filter.number = 10)
+```
+
+\
+
+### $\textbf{Comparison of My Replication with Existing Package}$
+```{r, fig.width=5, fig.height=5}
+# pdf(file = '../Report/plot/compare_smash.pdf', width = 5, height = 5)
+MSE_res1 <- sum((res1$mu - mu)^2) / N
+MSE_res2 <- sum((res2 - mu)^2) / N
+MSE_res3 <- sum((res3 - mu)^2) / N
+MSE <- tibble(Algo = c('My_Rep', 'My_Rep+ash', 'Package'), 
+              MSE = c(MSE_res1, MSE_res2, MSE_res3))
+
+ggplot(data=MSE, aes(x=Algo, y=MSE, fill=Algo)) +
+  geom_bar(stat="identity", width=0.6) +
+  theme_minimal()
+# dev.off()
+```
+
