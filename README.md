@@ -6,4 +6,4 @@ This file defines some of the mean, variance and intensity functions
 used to simulate Gaussian and Poisson data sets.
 
 ## Description of files in "demo" folder 
-
+1. The "ash_demo.Rmd" and "ash_demo.html" are the comparison of my own replication of the ASH method with the ash function in R package ashr
